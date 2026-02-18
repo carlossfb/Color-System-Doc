@@ -1,0 +1,130 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>Color System Doc</title>
+    <style>
+      body {
+        font-family: Inter, sans-serif;
+        font-size: 12px;
+        margin: 16px;
+      }
+
+      h2 {
+        margin-top: 0;
+      }
+
+      select {
+        width: 100%;
+        margin-top: 4px;
+        margin-bottom: 12px;
+      }
+
+      button {
+        width: 100%;
+        margin-top: 8px;
+        padding: 6px;
+      }
+    </style>
+  </head>
+
+  <body>
+    <h2>Color System Doc</h2>
+
+    <p>
+      Collection:<br />
+      <select id="collection"></select>
+    </p>
+
+    <p>
+      Mode:<br />
+      <select id="mode"></select>
+    </p>
+
+    <button id="generate">Generate</button>
+    <button id="cancel">Cancel</button>
+
+    <script>
+      const collectionSelect = document.getElementById("collection");
+      const modeSelect = document.getElementById("mode");
+
+      // Handshake
+      window.onload = () => {
+        parent.postMessage({ pluginMessage: { type: "ui-ready" } }, "*");
+      };
+
+      window.onmessage = (event) => {
+        const msg = event.data.pluginMessage;
+        if (!msg) return;
+
+        if (msg.type === "collections") {
+          collectionSelect.innerHTML = "";
+          modeSelect.innerHTML = "";
+
+          if (!msg.collections || msg.collections.length === 0) {
+            const option = document.createElement("option");
+            option.textContent = "No collections found";
+            collectionSelect.appendChild(option);
+            return;
+          }
+
+          msg.collections.forEach((collection, index) => {
+            const option = document.createElement("option");
+            option.value = collection.id;
+
+            option.textContent =
+              collection.name && collection.name.trim() !== ""
+                ? collection.name
+                : `Collection ${index + 1}`;
+
+            collectionSelect.appendChild(option);
+          });
+
+          updateModes(msg.collections[0]);
+
+          collectionSelect.onchange = () => {
+            const selected = msg.collections.find(
+              (c) => c.id === collectionSelect.value,
+            );
+            if (selected) updateModes(selected);
+          };
+        }
+      };
+
+      function updateModes(collection) {
+        modeSelect.innerHTML = "";
+
+        if (!collection.modes || collection.modes.length === 0) {
+          const option = document.createElement("option");
+          option.textContent = "No modes available";
+          modeSelect.appendChild(option);
+          return;
+        }
+
+        collection.modes.forEach((mode) => {
+          const option = document.createElement("option");
+          option.value = mode.modeId;
+          option.textContent = mode.name;
+          modeSelect.appendChild(option);
+        });
+      }
+
+      document.getElementById("generate").onclick = () => {
+        parent.postMessage(
+          {
+            pluginMessage: {
+              type: "generate-doc",
+              collectionId: collectionSelect.value,
+              modeId: modeSelect.value,
+            },
+          },
+          "*",
+        );
+      };
+
+      document.getElementById("cancel").onclick = () => {
+        parent.postMessage({ pluginMessage: { type: "cancel" } }, "*");
+      };
+    </script>
+  </body>
+</html>
