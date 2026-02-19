@@ -1,76 +1,269 @@
 figma.showUI(__html__, { width: 360, height: 500 });
 
-// --- Interfaces para Typescript ---
-interface ColorMode {
-  type: "COLOR" | "VARIABLE_REFERENCE";
-  modeId: string;
-  color?: { r: number; g: number; b: number };
-  variableId?: string;
-}
+class Color {
+  readonly r: number;
+  readonly g: number;
+  readonly b: number;
 
-// 🔹 Converte RGB para HEX sem usar padStart
-function rgbToHex(r: number, g: number, b: number) {
-  const toHex = (c: number) => {
-    const hex = Math.round(c * 255).toString(16);
-    return hex.length === 1 ? "0" + hex : hex;
-  };
-  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
-}
-
-async function resolveColor(
-  variable: any,
-  modeId: string,
-): Promise<string | null> {
-  if (!variable.valuesByMode) return null;
-
-  const value = variable.valuesByMode[modeId];
-  console.log("resolve color: ", variable);
-  //console.log(modeId);
-  //console.log(value);
-  if (!value) return null;
-
-  // 🔥 COR REAL (jeito certo da API)
-  if (
-    variable.resolvedType === "COLOR" &&
-    typeof value.r === "number" &&
-    typeof value.g === "number" &&
-    typeof value.b === "number"
-  ) {
-    return rgbToHex(value.r, value.g, value.b);
+  constructor(r: number, g: number, b: number) {
+    this.r = r;
+    this.g = g;
+    this.b = b;
   }
 
-  if (
-    (value.type === "VARIABLE_REFERENCE" || value.type === "VARIABLE_ALIAS") &&
-    value.id
+  toHex(): string {
+    const toHex = (c: number) => {
+      const hex = Math.round(c * 255).toString(16);
+      return hex.length === 1 ? "0" + hex : hex;
+    };
+
+    return `#${toHex(this.r)}${toHex(this.g)}${toHex(this.b)}`;
+  }
+}
+
+class ColorToken {
+  readonly id: string;
+  readonly name: string;
+  readonly description?: string;
+  readonly color: string;
+
+  private constructor(
+    id: string,
+    name: string,
+    description: string | undefined,
+    color: string,
   ) {
-    const refVariable = await figma.variables.getVariableByIdAsync(value.id);
-    //console.log("Variable reference found:", refVariable);
+    this.id = id;
+    this.name = name;
+    this.description = description;
+    this.color = color;
+  }
 
-    if (!refVariable) return null;
+  static async fromVariable(
+    variable: Variable,
+    modeId: string,
+  ): Promise<ColorToken | null> {
+    // 🔥 garante que só trabalha com variável de cor
+    if (variable.resolvedType !== "COLOR") return null;
 
-    // 🔥 Se o mesmo modeId existir na variável referenciada, usa ele
-    if (refVariable.valuesByMode[modeId]) {
-      //console.log("Using same modeId in reference:", modeId);
-      return resolveColor(refVariable, modeId);
+    const rgb = await this.resolve(variable, modeId);
+    if (!rgb) return null;
+
+    const color = new Color(rgb.r, rgb.g, rgb.b);
+
+    return new ColorToken(
+      variable.id,
+      variable.name,
+      variable.description,
+      color.toHex(),
+    );
+  }
+
+  private static async resolve(
+    variable: Variable,
+    modeId: string,
+    visited = new Set<string>(),
+  ): Promise<{ r: number; g: number; b: number } | null> {
+    if (!variable.valuesByMode) return null;
+
+    if (visited.has(variable.id)) return null;
+    visited.add(variable.id);
+
+    let value = variable.valuesByMode[modeId];
+
+    if (!value) return null;
+
+    // 🔥 COR REAL
+    if (variable.resolvedType === "COLOR" && this.isRGB(value)) {
+      return value;
     }
 
-    // 🔥 Caso contrário, precisamos descobrir qual modeId existe nela
-    const refModeIds = Object.keys(refVariable.valuesByMode);
+    // 🔥 VARIABLE_REFERENCE ou VARIABLE_ALIAS
+    if (this.isAlias(value)) {
+      const refVariable = await figma.variables.getVariableByIdAsync(value.id);
 
-    if (refModeIds.length === 0) return null;
+      if (!refVariable) return null;
 
-    const realModeId = refModeIds[0]; // aqui você está pegando o modeId real existente
-    //console.log("Using reference variable modeId:", realModeId);
+      // ✅ Se o mesmo mode existir na referenciada
+      if (refVariable.valuesByMode[modeId]) {
+        return this.resolve(refVariable, modeId, visited);
+      }
 
-    return resolveColor(refVariable, realModeId);
+      // ✅ Senão, pega o mode real existente nela
+      const refModeIds = Object.keys(refVariable.valuesByMode);
+
+      if (refModeIds.length === 0) return null;
+
+      const realModeId = refModeIds[0];
+
+      return this.resolve(refVariable, realModeId, visited);
+    }
+
+    return null;
   }
 
-  return null;
+  // -----------------------------
+  // Type Guards privados
+  // -----------------------------
+
+  private static isRGB(value: VariableValue): value is RGB {
+    return (
+      typeof value === "object" &&
+      value !== null &&
+      "r" in value &&
+      "g" in value &&
+      "b" in value
+    );
+  }
+
+  private static isAlias(value: VariableValue): value is VariableAlias {
+    return (
+      typeof value === "object" &&
+      value !== null &&
+      "type" in value &&
+      value.type === "VARIABLE_ALIAS"
+    );
+  }
 }
 
-// tt
+class FrameBuilder {
+  private node: FrameNode;
 
-// 🔹 Envia para o UI todas as collections de variáveis de cor locais
+  private constructor(name?: string) {
+    this.node = figma.createFrame();
+
+    if (name) {
+      this.node.name = name;
+    }
+  }
+
+  static create(name?: string): FrameBuilder {
+    return new FrameBuilder(name);
+  }
+
+  name(value: string): this {
+    this.node.name = value;
+    return this;
+  }
+
+  size(width: number, height: number): this {
+    this.node.resize(width, height);
+    return this;
+  }
+
+  layout(mode: "NONE" | "HORIZONTAL" | "VERTICAL"): this {
+    this.node.layoutMode = mode;
+    return this;
+  }
+
+  padding(value: number): this {
+    this.node.paddingLeft = value;
+    this.node.paddingRight = value;
+    this.node.paddingTop = value;
+    this.node.paddingBottom = value;
+    return this;
+  }
+
+  spacing(value: number): this {
+    this.node.itemSpacing = value;
+    return this;
+  }
+
+  align(value: "MIN" | "CENTER" | "MAX" | "STRETCH"): this {
+    this.node.layoutAlign = value;
+    return this;
+  }
+
+  primarySizing(mode: "AUTO" | "FIXED"): this {
+    this.node.primaryAxisSizingMode = mode;
+    return this;
+  }
+
+  counterSizing(mode: "AUTO" | "FIXED"): this {
+    this.node.counterAxisSizingMode = mode;
+    return this;
+  }
+
+  appendTo(parent: BaseNode & ChildrenMixin): this {
+    parent.appendChild(this.node);
+    return this;
+  }
+
+  build(): FrameNode {
+    return this.node;
+  }
+}
+
+class TextBuilder {
+  private node: TextNode;
+
+  private constructor(text?: string) {
+    this.node = figma.createText();
+
+    if (text) {
+      this.node.characters = text;
+    }
+  }
+
+  static create(text?: string): TextBuilder {
+    return new TextBuilder(text);
+  }
+
+  name(value: string): this {
+    this.node.name = value;
+    return this;
+  }
+
+  characters(value: string): this {
+    this.node.characters = value;
+    return this;
+  }
+
+  font(family: string, style: string): this {
+    this.node.fontName = { family, style };
+    return this;
+  }
+
+  fontSize(size: number): this {
+    this.node.fontSize = size;
+    return this;
+  }
+
+  lineHeight(value: number): this {
+    this.node.lineHeight = { value, unit: "PIXELS" };
+    return this;
+  }
+
+  letterSpacing(value: number): this {
+    this.node.letterSpacing = { value, unit: "PIXELS" };
+    return this;
+  }
+
+  alignHorizontal(value: "LEFT" | "CENTER" | "RIGHT" | "JUSTIFIED"): this {
+    this.node.textAlignHorizontal = value;
+    return this;
+  }
+
+  alignVertical(value: "TOP" | "CENTER" | "BOTTOM"): this {
+    this.node.textAlignVertical = value;
+    return this;
+  }
+
+  resize(width: number, height: number): this {
+    this.node.resize(width, height);
+    return this;
+  }
+
+  appendTo(parent: BaseNode & ChildrenMixin): this {
+    parent.appendChild(this.node);
+    return this;
+  }
+
+  build(): TextNode {
+    return this.node;
+  }
+}
+
 async function sendCollections() {
   const collections = await figma.variables.getLocalVariableCollectionsAsync();
 
@@ -86,136 +279,116 @@ async function sendCollections() {
   });
 }
 
-// 🔹 Gera o frame com o Color System da collection selecionada
 async function generateDoc(collectionId: string, modeId: string) {
-  //console.log( `Gerando doc para collectionId: ${collectionId}, modeId: ${modeId}`);
-  // 🔹 Container principal
-  const mainContainer = figma.createFrame();
-  mainContainer.name = "Color System";
-  mainContainer.resize(1024, 1080);
-  mainContainer.layoutMode = "VERTICAL";
-  mainContainer.paddingLeft = 10;
-  mainContainer.paddingRight = 10;
-  mainContainer.paddingTop = 10;
-  mainContainer.paddingBottom = 10;
-  mainContainer.itemSpacing = 10;
-  figma.currentPage.appendChild(mainContainer);
-
-  // 🔹 Header
-  const header = figma.createFrame();
-  header.name = "Header";
-  header.layoutMode = "VERTICAL";
-  header.layoutAlign = "STRETCH";
-  header.paddingLeft = 64;
-  header.paddingRight = 64;
-  header.paddingTop = 64;
-  header.paddingBottom = 64;
-  header.itemSpacing = 22;
-  mainContainer.appendChild(header);
-
-  const headerContent = figma.createFrame();
-  headerContent.name = "Header Content";
-  headerContent.layoutMode = "VERTICAL";
-  headerContent.layoutAlign = "STRETCH";
-  headerContent.paddingLeft = 0;
-  headerContent.paddingRight = 0;
-  headerContent.paddingTop = 0;
-  headerContent.paddingBottom = 0;
-  headerContent.itemSpacing = 22;
-  header.appendChild(headerContent);
-  await figma.loadFontAsync({ family: "Inter", style: "Semi Bold" });
-  const headerContentText = figma.createText();
-  headerContentText.fontName = { family: "Inter", style: "Semi Bold" };
-  headerContentText.characters = "Colors";
-  headerContentText.fontSize = 48;
-  headerContent.appendChild(headerContentText);
-
-  // 🔹 Content
-  const content = figma.createFrame();
-  content.name = "content";
-  content.layoutAlign = "STRETCH";
-  content.counterAxisSizingMode = "AUTO";
-  content.primaryAxisSizingMode = "FIXED";
-  content.layoutMode = "HORIZONTAL";
-  content.paddingLeft = 64;
-  content.paddingRight = 64;
-  content.paddingTop = 64;
-  content.paddingBottom = 64;
-  content.itemSpacing = 22;
-  mainContainer.appendChild(content);
-
-  const contentDescription = figma.createFrame();
-  contentDescription.resize(412, 80);
-  contentDescription.name = "Content Description";
-  contentDescription.layoutMode = "VERTICAL";
-  contentDescription.paddingLeft = 10;
-  contentDescription.paddingRight = 10;
-  contentDescription.paddingTop = 10;
-  contentDescription.paddingBottom = 10;
-  contentDescription.itemSpacing = 8;
-  content.appendChild(contentDescription);
-
   await figma.loadFontAsync({ family: "Inter", style: "Semi Bold" });
   await figma.loadFontAsync({ family: "Inter", style: "Regular" });
-  const contentDescriptionText = figma.createText();
-  contentDescriptionText.fontName = { family: "Inter", style: "Semi Bold" };
-  contentDescriptionText.characters = "Token";
-  contentDescriptionText.fontSize = 24;
-  contentDescription.appendChild(contentDescriptionText);
 
-  const contentSubDescription = figma.createFrame();
-  contentSubDescription.name = "Content Sub Description";
-  contentSubDescription.layoutMode = "HORIZONTAL";
-  contentSubDescription.counterAxisSizingMode = "AUTO";
-  contentSubDescription.primaryAxisSizingMode = "AUTO";
-  contentSubDescription.paddingLeft = 0;
-  contentSubDescription.paddingRight = 0;
-  contentSubDescription.paddingTop = 0;
-  contentSubDescription.paddingBottom = 0;
-  contentSubDescription.itemSpacing = 16;
-  contentDescription.appendChild(contentSubDescription);
+  const mainContainer = FrameBuilder.create("Color System")
+    .size(1024, 1080)
+    .layout("VERTICAL")
+    .padding(10)
+    .spacing(10)
+    .appendTo(figma.currentPage)
+    .build();
 
-  const contentSubDescriptionLabel = figma.createText();
-  contentSubDescriptionLabel.fontName = { family: "Inter", style: "Semi Bold" };
-  contentSubDescriptionLabel.characters = "In Use";
-  contentSubDescriptionLabel.fontSize = 16;
-  contentSubDescription.appendChild(contentSubDescriptionLabel);
+  const header = FrameBuilder.create("Header")
+    .layout("VERTICAL")
+    .align("STRETCH")
+    .padding(64)
+    .spacing(22)
+    .appendTo(mainContainer)
+    .build();
 
-  const contentSubDescriptionText = figma.createText();
-  contentSubDescriptionText.fontName = { family: "Inter", style: "Regular" };
-  contentSubDescriptionText.characters =
-    "You can safety delete colors not in use";
-  contentSubDescriptionText.fontSize = 14;
-  contentSubDescription.appendChild(contentSubDescriptionText);
+  const headerContent = FrameBuilder.create("Header Content")
+    .layout("VERTICAL")
+    .align("STRETCH")
+    .spacing(22)
+    .appendTo(header)
+    .build();
 
-  const colorDescription = figma.createFrame();
-  colorDescription.resize(412, 80);
-  colorDescription.name = "Color Description";
-  colorDescription.layoutAlign = "STRETCH";
-  colorDescription.layoutMode = "VERTICAL";
-  colorDescription.paddingLeft = 10;
-  colorDescription.paddingRight = 10;
-  colorDescription.paddingTop = 10;
-  colorDescription.paddingBottom = 10;
-  colorDescription.itemSpacing = 8;
-  content.appendChild(colorDescription);
+  TextBuilder.create("Colors")
+    .font("Inter", "Semi Bold")
+    .fontSize(48)
+    .appendTo(headerContent)
+    .build();
 
-  // --- Teste rápido dentro do generateDoc ---
+  const content = FrameBuilder.create("content")
+    .layout("HORIZONTAL")
+    .align("STRETCH")
+    .padding(64)
+    .spacing(22)
+    .primarySizing("FIXED")
+    .counterSizing("AUTO")
+    .appendTo(mainContainer)
+    .build();
+
+  const contentDescription = FrameBuilder.create("Content Description")
+    .size(412, 80)
+    .layout("VERTICAL")
+    .padding(10)
+    .spacing(8)
+    .appendTo(content)
+    .build();
+
+  TextBuilder.create("Token")
+    .font("Inter", "Semi Bold")
+    .fontSize(24)
+    .appendTo(contentDescription)
+    .build();
+
+  const contentSubDescription = FrameBuilder.create("Content Sub Description")
+    .layout("HORIZONTAL")
+    .primarySizing("AUTO")
+    .counterSizing("AUTO")
+    .spacing(16)
+    .appendTo(contentDescription)
+    .build();
+
+  TextBuilder.create("In Use")
+    .font("Inter", "Semi Bold")
+    .fontSize(16)
+    .appendTo(contentSubDescription)
+    .build();
+
+  TextBuilder.create("You can safety delete colors not in use")
+    .font("Inter", "Regular")
+    .fontSize(14)
+    .appendTo(contentSubDescription)
+    .build();
+
+  FrameBuilder.create("Color Description")
+    .size(412, 80)
+    .layout("VERTICAL")
+    .align("STRETCH")
+    .padding(10)
+    .spacing(8)
+    .appendTo(content)
+    .build();
+
   const allVariables = await figma.variables.getLocalVariablesAsync();
+
   const variablesInCollection = allVariables.filter(
-    (v: any) => v.variableCollectionId === collectionId,
+    (v: Variable) => v.variableCollectionId === collectionId,
   );
 
-  //console.log(variablesInCollection);
-  //console.log("🔹 Testando cores da collection selecionada:");
-  for (const v of variablesInCollection) {
-    console.log(await resolveColor(v, modeId));
+  const tokens: ColorToken[] = [];
+
+  console.log("Variáveis encontradas na collection: ", variablesInCollection);
+
+  for (const variable of variablesInCollection) {
+    const token = await ColorToken.fromVariable(variable, modeId);
+
+    if (token) {
+      tokens.push(token);
+    }
   }
+
+  console.log("Tokens resolvidos: ", tokens);
 
   figma.notify("Documento gerado com sucesso!");
 }
 
-// 🔹 Comunicação com UI
+// Comunicação com UI
 figma.ui.onmessage = async (msg) => {
   if (msg.type === "ui-ready") {
     await sendCollections();
