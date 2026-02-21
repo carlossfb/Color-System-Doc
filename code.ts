@@ -28,6 +28,27 @@ class Color {
 
     return `#${toHex(this.r)}${toHex(this.g)}${toHex(this.b)}`;
   }
+
+  private toLinear(channel: number): number {
+    return channel <= 0.03928
+      ? channel / 12.92
+      : Math.pow((channel + 0.055) / 1.055, 2.4);
+  }
+
+  getLuminance(): number {
+    const r = this.toLinear(this.r);
+    const g = this.toLinear(this.g);
+    const b = this.toLinear(this.b);
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  }
+
+  getContrastRatio(other: Color): number {
+    const l1 = this.getLuminance();
+    const l2 = other.getLuminance();
+    const lighter = Math.max(l1, l2);
+    const darker = Math.min(l1, l2);
+    return (lighter + 0.05) / (darker + 0.05);
+  }
 }
 
 class ColorToken {
@@ -347,6 +368,28 @@ class TextBuilder {
 
 type ColorPair = { background?: ColorToken; foreground?: ColorToken };
 
+type ContrastResult = {
+  ratio: number;
+  normalText: "AAA" | "AA" | "FAIL";
+  largeText: "AAA" | "AA" | "FAIL";
+};
+
+function calculateContrast(pair: ColorPair): ContrastResult | null {
+  if (!pair.background || !pair.foreground) {
+    return null;
+  }
+
+  const ratio = pair.background.color.getContrastRatio(pair.foreground.color);
+
+  const normalText: ContrastResult["normalText"] =
+    ratio >= 7 ? "AAA" : ratio >= 4.5 ? "AA" : "FAIL";
+
+  const largeText: ContrastResult["largeText"] =
+    ratio >= 4.5 ? "AAA" : ratio >= 3 ? "AA" : "FAIL";
+
+  return { ratio, normalText, largeText };
+}
+
 class NamespaceCollection {
   constructor(private readonly groups: Map<string, ColorToken[]>) {}
 
@@ -422,10 +465,8 @@ async function sendCollections() {
   });
 }
 
-async function createColorSystemTable(
-  grouped: Map<string, Record<string, ColorPair>>,
-) {
-  const columnWidths = {
+const TABLE_CONFIG = {
+  columnWidths: {
     context: 120,
     tokenName: 120,
     use: 240,
@@ -434,27 +475,42 @@ async function createColorSystemTable(
     square: 64,
     ratio: 64,
     preview: 64,
-  };
+  },
+  rowHeight: 64,
+  spacing: 24,
+};
 
-  const rowHeight = 64;
-  const spacing = 24;
+function createColorSquare(
+  color?: Color,
+  width = TABLE_CONFIG.columnWidths.square,
+  height = TABLE_CONFIG.columnWidths.square,
+): RectangleNode {
+  const rect = figma.createRectangle();
+  rect.resize(width, height);
 
-  // FRAME PRINCIPAL
-  const tableFrame = FrameBuilder.create("Color System Table")
-    .primarySizing("AUTO")
-    .counterSizing("AUTO")
-    .layout("VERTICAL")
-    .spacing(spacing)
-    .padding(16)
-    .build();
+  if (color) {
+    rect.fills = [
+      {
+        type: "SOLID",
+        color: { r: color.r, g: color.g, b: color.b },
+      },
+    ];
+  } else {
+    rect.fills = [];
+  }
 
-  // ---------------- HEADER ----------------
+  return rect;
+}
+
+function createTableHeader(parent: FrameNode): void {
+  const { columnWidths, rowHeight, spacing } = TABLE_CONFIG;
+
   const headerFrame = FrameBuilder.create("Header")
     .layout("HORIZONTAL")
     .primarySizing("AUTO")
     .counterSizing("AUTO")
     .spacing(spacing)
-    .appendTo(tableFrame)
+    .appendTo(parent)
     .build();
 
   const headers = [
@@ -479,143 +535,149 @@ async function createColorSystemTable(
       )
       .appendTo(headerFrame);
   }
+}
 
-  // Helper para criar quadrado de cor
-  function createColorSquare(
-    color?: Color,
-    width = columnWidths.square,
-    height = columnWidths.square,
-  ): RectangleNode {
-    const rect = figma.createRectangle();
-    rect.resize(width, height);
+function createPreviewCell(
+  parent: FrameNode,
+  pair: ColorPair,
+): void {
+  const { columnWidths, rowHeight } = TABLE_CONFIG;
 
-    if (color) {
-      rect.fills = [
-        {
-          type: "SOLID",
-          color: { r: color.r, g: color.g, b: color.b },
+  const previewFrame = FrameBuilder.create()
+    .size(columnWidths.preview, rowHeight)
+    .layout("NONE")
+    .appendTo(parent)
+    .build();
+
+  const previewRect = createColorSquare(
+    pair.background?.color,
+    columnWidths.square,
+    rowHeight,
+  );
+
+  previewFrame.appendChild(previewRect);
+
+  if (pair.foreground) {
+    const previewText = TextBuilder.create("AA")
+      .font("Inter", "Semi Bold")
+      .fontSize(12)
+      .resize(columnWidths.preview, rowHeight)
+      .appendTo(previewFrame)
+      .alignHorizontal("CENTER")
+      .alignVertical("CENTER")
+      .build();
+
+    previewText.fills = [
+      {
+        type: "SOLID",
+        color: {
+          r: pair.foreground.color.r,
+          g: pair.foreground.color.g,
+          b: pair.foreground.color.b,
         },
-      ];
-    } else {
-      rect.fills = [];
-    }
-
-    return rect;
+      },
+    ];
   }
+}
 
-  // ---------------- ROWS ----------------
+function createTableRow(
+  parent: FrameNode,
+  namespace: string,
+  fullName: string,
+  pair: ColorPair,
+): void {
+  const { columnWidths, rowHeight, spacing } = TABLE_CONFIG;
+
+  const rowFrame = FrameBuilder.create("Row")
+    .primarySizing("AUTO")
+    .counterSizing("AUTO")
+    .layout("HORIZONTAL")
+    .spacing(spacing)
+    .appendTo(parent)
+    .build();
+
+  TextBuilder.create(namespace)
+    .font("Inter", "Regular")
+    .fontSize(12)
+    .alignVertical("CENTER")
+    .resize(columnWidths.context, rowHeight)
+    .appendTo(rowFrame);
+
+  TextBuilder.create(fullName)
+    .font("Inter", "Semi Bold")
+    .fontSize(12)
+    .alignVertical("CENTER")
+    .resize(columnWidths.tokenName, rowHeight)
+    .appendTo(rowFrame);
+
+  TextBuilder.create(pair.background?.description || "")
+    .font("Inter", "Regular")
+    .fontSize(12)
+    .alignVertical("CENTER")
+    .resize(columnWidths.use, rowHeight)
+    .appendTo(rowFrame);
+
+  const backgroundFrame = FrameBuilder.create("background")
+    .layout("VERTICAL")
+    .size(columnWidths.background, rowHeight)
+    .spacing(spacing)
+    .appendTo(rowFrame)
+    .build();
+
+  backgroundFrame.appendChild(
+    createColorSquare(
+      pair.background?.color,
+      columnWidths.square,
+      rowHeight,
+    ),
+  );
+
+  const foregroundFrame = FrameBuilder.create("foreground")
+    .layout("VERTICAL")
+    .size(columnWidths.foreground, rowHeight)
+    .spacing(spacing)
+    .appendTo(rowFrame)
+    .build();
+
+  foregroundFrame.appendChild(
+    createColorSquare(
+      pair.foreground?.color,
+      columnWidths.square,
+      rowHeight,
+    ),
+  );
+
+  const contrast = calculateContrast(pair);
+  const ratioText = contrast
+    ? `${contrast.ratio.toFixed(2)}\n${contrast.normalText} / ${contrast.largeText}`
+    : "-";
+
+  TextBuilder.create(ratioText)
+    .font("Inter", "Regular")
+    .fontSize(10)
+    .alignVertical("CENTER")
+    .resize(columnWidths.ratio, rowHeight)
+    .appendTo(rowFrame);
+
+  createPreviewCell(rowFrame, pair);
+}
+
+function createColorSystemTable(
+  grouped: Map<string, Record<string, ColorPair>>,
+): FrameNode {
+  const tableFrame = FrameBuilder.create("Color System Table")
+    .primarySizing("AUTO")
+    .counterSizing("AUTO")
+    .layout("VERTICAL")
+    .spacing(TABLE_CONFIG.spacing)
+    .padding(16)
+    .build();
+
+  createTableHeader(tableFrame);
+
   for (const [namespace, pairs] of grouped.entries()) {
     for (const fullName in pairs) {
-      const pair = pairs[fullName];
-
-      const rowFrame = FrameBuilder.create("Row")
-        .primarySizing("AUTO")
-        .counterSizing("AUTO")
-        .layout("HORIZONTAL")
-        .spacing(spacing)
-        .appendTo(tableFrame)
-        .build();
-
-      // Context
-      TextBuilder.create(namespace)
-        .font("Inter", "Regular")
-        .fontSize(12)
-        .alignVertical("CENTER")
-        .resize(columnWidths.context, rowHeight)
-        .appendTo(rowFrame);
-
-      // Token Name
-      TextBuilder.create(fullName)
-        .font("Inter", "Semi Bold")
-        .fontSize(12)
-        .alignVertical("CENTER")
-        .resize(columnWidths.tokenName, rowHeight)
-        .appendTo(rowFrame);
-
-      // Use (placeholder)
-      TextBuilder.create(pairs[fullName].background?.description || "")
-        .font("Inter", "Regular")
-        .fontSize(12)
-        .alignVertical("CENTER")
-        .resize(columnWidths.use, rowHeight)
-        .appendTo(rowFrame);
-
-      const backgroundFrame = FrameBuilder.create("background")
-        .layout("VERTICAL")
-        .size(columnWidths.background, rowHeight)
-        .spacing(spacing)
-        .appendTo(rowFrame)
-        .build();
-
-      // Background
-      backgroundFrame.appendChild(
-        createColorSquare(
-          pair.background ? pair.background.color : undefined,
-          columnWidths.square,
-          rowHeight,
-        ),
-      );
-      const foregroundFrame = FrameBuilder.create("foreground")
-        .layout("VERTICAL")
-        .size(columnWidths.foreground, rowHeight)
-        .spacing(spacing)
-        .appendTo(rowFrame)
-        .build();
-
-      // Foreground
-      foregroundFrame.appendChild(
-        createColorSquare(
-          pair.foreground ? pair.foreground.color : undefined,
-          columnWidths.square,
-          rowHeight,
-        ),
-      );
-
-      // Ratio (placeholder por enquanto)
-      TextBuilder.create("AAA")
-        .font("Inter", "Regular")
-        .fontSize(12)
-        .alignVertical("CENTER")
-        .resize(columnWidths.ratio, rowHeight)
-        .appendTo(rowFrame);
-
-      // Preview
-      const previewFrame = FrameBuilder.create()
-        .size(columnWidths.preview, rowHeight)
-        .layout("NONE") // permite sobreposição
-        .appendTo(rowFrame)
-        .build();
-
-      const previewRect = createColorSquare(
-        pair.background ? pair.background.color : undefined,
-        columnWidths.square,
-        rowHeight,
-      );
-
-      previewFrame.appendChild(previewRect);
-
-      const previewText = TextBuilder.create("AA")
-        .font("Inter", "Semi Bold")
-        .fontSize(12)
-        .resize(columnWidths.preview, rowHeight)
-        .appendTo(previewFrame)
-        .alignHorizontal("CENTER")
-        .alignVertical("CENTER")
-        .build();
-
-      // Aplica foreground no texto do preview se existir
-      if (pair.foreground) {
-        previewText.fills = [
-          {
-            type: "SOLID",
-            color: {
-              r: pair.foreground.color.r,
-              g: pair.foreground.color.g,
-              b: pair.foreground.color.b,
-            },
-          },
-        ];
-      }
+      createTableRow(tableFrame, namespace, fullName, pairs[fullName]);
     }
   }
 
@@ -725,7 +787,7 @@ async function generateDoc(collectionId: string, modeId: string) {
 
   const grouped = collection.groupByNamespace().groupByPair();
 
-  const colorFrame = await createColorSystemTable(grouped);
+  const colorFrame = createColorSystemTable(grouped);
   colorDecription.appendChild(colorFrame);
 
   console.log(Array.from(grouped.entries()));
