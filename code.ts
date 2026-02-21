@@ -4,11 +4,20 @@ class Color {
   readonly r: number;
   readonly g: number;
   readonly b: number;
+  readonly hex: string;
 
   constructor(r: number, g: number, b: number) {
-    this.r = r;
-    this.g = g;
-    this.b = b;
+    this.r = Color.clamp(r);
+    this.g = Color.clamp(g);
+    this.b = Color.clamp(b);
+    this.hex = this.toHex();
+  }
+
+  // Garante valores entre 0 e 1
+  private static clamp(value: number): number {
+    if (value < 0) return 0;
+    if (value > 1) return 1;
+    return value;
   }
 
   toHex(): string {
@@ -25,13 +34,13 @@ class ColorToken {
   readonly id: string;
   readonly name: string;
   readonly description?: string;
-  readonly color: string;
+  readonly color: Color;
 
   private constructor(
     id: string,
     name: string,
     description: string | undefined,
-    color: string,
+    color: Color,
   ) {
     this.id = id;
     this.name = name;
@@ -39,11 +48,71 @@ class ColorToken {
     this.color = color;
   }
 
+  // -----------------------------
+  // 🔹 Helpers de normalização
+  // -----------------------------
+
+  private normalize(value: string): string {
+    return value.trim().toLowerCase().replace(/\s+/g, " ");
+  }
+
+  private getRawTokenName(): string {
+    const parts = this.name.split("/");
+    return parts.length > 1 ? parts[1] : parts[0];
+  }
+
+  private getNormalizedTokenName(): string {
+    return this.normalize(this.getRawTokenName());
+  }
+
+  // -----------------------------
+  // 🔹 Regras de pareamento
+  // -----------------------------
+
+  isForeground(): boolean {
+    const token = this.getNormalizedTokenName();
+
+    // foreground raiz
+    if (token === "foreground") return true;
+
+    // foreground 2, foreground 3...
+    if (token.startsWith("foreground ")) return true;
+
+    // primary foreground
+    if (token.endsWith(" foreground")) return true;
+
+    return false;
+  }
+
+  getBaseName(): string {
+    const token = this.getNormalizedTokenName();
+
+    // foreground raiz → background
+    if (token === "foreground") return "background";
+
+    // foreground 2 → background 2
+    if (token.startsWith("foreground ")) {
+      return token.replace(/^foreground/, "background");
+    }
+
+    // primary foreground → primary
+    if (token.endsWith(" foreground")) {
+      return token.replace(/ foreground$/, "");
+    }
+
+    return token;
+  }
+
+  getNamespace(): string {
+    if (!this.name.includes("/")) return "global";
+
+    return this.normalize(this.name.split("/")[0]);
+  }
+
   static async fromVariable(
     variable: Variable,
     modeId: string,
   ): Promise<ColorToken | null> {
-    // 🔥 garante que só trabalha com variável de cor
     if (variable.resolvedType !== "COLOR") return null;
 
     const rgb = await this.resolve(variable, modeId);
@@ -55,7 +124,7 @@ class ColorToken {
       variable.id,
       variable.name,
       variable.description,
-      color.toHex(),
+      color,
     );
   }
 
@@ -73,23 +142,19 @@ class ColorToken {
 
     if (!value) return null;
 
-    // 🔥 COR REAL
     if (variable.resolvedType === "COLOR" && this.isRGB(value)) {
       return value;
     }
 
-    // 🔥 VARIABLE_REFERENCE ou VARIABLE_ALIAS
     if (this.isAlias(value)) {
       const refVariable = await figma.variables.getVariableByIdAsync(value.id);
 
       if (!refVariable) return null;
 
-      // ✅ Se o mesmo mode existir na referenciada
       if (refVariable.valuesByMode[modeId]) {
         return this.resolve(refVariable, modeId, visited);
       }
 
-      // ✅ Senão, pega o mode real existente nela
       const refModeIds = Object.keys(refVariable.valuesByMode);
 
       if (refModeIds.length === 0) return null;
@@ -131,6 +196,7 @@ class FrameBuilder {
 
   private constructor(name?: string) {
     this.node = figma.createFrame();
+    this.node.fills = [];
 
     if (name) {
       this.node.name = name;
@@ -186,6 +252,21 @@ class FrameBuilder {
 
   appendTo(parent: BaseNode & ChildrenMixin): this {
     parent.appendChild(this.node);
+    return this;
+  }
+
+  fillHex(hex: string): this {
+    const clean = hex.replace("#", "");
+    const r = parseInt(clean.substring(0, 2), 16) / 255;
+    const g = parseInt(clean.substring(2, 4), 16) / 255;
+    const b = parseInt(clean.substring(4, 6), 16) / 255;
+
+    this.node.fills = [
+      {
+        type: "SOLID",
+        color: { r, g, b },
+      },
+    ];
     return this;
   }
 
@@ -264,6 +345,68 @@ class TextBuilder {
   }
 }
 
+type ColorPair = { background?: ColorToken; foreground?: ColorToken };
+
+class NamespaceCollection {
+  constructor(private readonly groups: Map<string, ColorToken[]>) {}
+
+  /**
+   * Retorna diretamente Map externo (namespace) -> Record interno (pares baseName -> {background, foreground})
+   * O Record interno substitui o Map interno, permitindo imprimir e serializar facilmente.
+   */
+  groupByPair(): Map<string, Record<string, ColorPair>> {
+    const result = new Map<string, Record<string, ColorPair>>();
+
+    for (const [namespace, tokens] of this.groups.entries()) {
+      const pairs: Record<string, ColorPair> = {};
+
+      for (const token of tokens) {
+        const baseName = token.getBaseName();
+
+        if (!pairs[baseName]) pairs[baseName] = {};
+
+        if (token.isForeground()) {
+          pairs[baseName].foreground = token;
+        } else {
+          pairs[baseName].background = token;
+        }
+      }
+
+      result.set(namespace, pairs);
+    }
+
+    return result;
+  }
+}
+
+class ColorTokenCollection {
+  private readonly tokens: ColorToken[] = [];
+
+  add(token: ColorToken): void {
+    this.tokens.push(token);
+  }
+
+  getAll(): ColorToken[] {
+    return [...this.tokens];
+  }
+
+  /**
+   * Agrupa tokens por namespace e retorna uma NamespaceCollection
+   * para permitir encadeamento: .groupByNamespace().groupByPair()
+   */
+  groupByNamespace(): NamespaceCollection {
+    const groups = new Map<string, ColorToken[]>();
+
+    for (const token of this.tokens) {
+      const ns = token.getNamespace();
+      if (!groups.has(ns)) groups.set(ns, []);
+      groups.get(ns)!.push(token);
+    }
+
+    return new NamespaceCollection(groups);
+  }
+}
+
 async function sendCollections() {
   const collections = await figma.variables.getLocalVariableCollectionsAsync();
 
@@ -279,15 +422,217 @@ async function sendCollections() {
   });
 }
 
+async function createColorSystemTable(
+  grouped: Map<string, Record<string, ColorPair>>,
+) {
+  const columnWidths = {
+    context: 120,
+    tokenName: 120,
+    use: 240,
+    background: 120,
+    foreground: 120,
+    square: 64,
+    ratio: 64,
+    preview: 64,
+  };
+
+  const rowHeight = 64;
+  const spacing = 24;
+
+  // FRAME PRINCIPAL
+  const tableFrame = FrameBuilder.create("Color System Table")
+    .primarySizing("AUTO")
+    .counterSizing("AUTO")
+    .layout("VERTICAL")
+    .spacing(spacing)
+    .padding(16)
+    .build();
+
+  // ---------------- HEADER ----------------
+  const headerFrame = FrameBuilder.create("Header")
+    .layout("HORIZONTAL")
+    .primarySizing("AUTO")
+    .counterSizing("AUTO")
+    .spacing(spacing)
+    .appendTo(tableFrame)
+    .build();
+
+  const headers = [
+    "Context",
+    "Token Name",
+    "Use",
+    "Background",
+    "Foreground",
+    "Ratio",
+    "Preview",
+  ];
+
+  const headerKeys = Object.keys(columnWidths);
+
+  for (let i = 0; i < headerKeys.length; i++) {
+    TextBuilder.create(headers[i])
+      .font("Inter", "Semi Bold")
+      .fontSize(12)
+      .resize(
+        columnWidths[headerKeys[i] as keyof typeof columnWidths],
+        rowHeight,
+      )
+      .appendTo(headerFrame);
+  }
+
+  // Helper para criar quadrado de cor
+  function createColorSquare(
+    color?: Color,
+    width = columnWidths.square,
+    height = columnWidths.square,
+  ): RectangleNode {
+    const rect = figma.createRectangle();
+    rect.resize(width, height);
+
+    if (color) {
+      rect.fills = [
+        {
+          type: "SOLID",
+          color: { r: color.r, g: color.g, b: color.b },
+        },
+      ];
+    } else {
+      rect.fills = [];
+    }
+
+    return rect;
+  }
+
+  // ---------------- ROWS ----------------
+  for (const [namespace, pairs] of grouped.entries()) {
+    for (const fullName in pairs) {
+      const pair = pairs[fullName];
+
+      const rowFrame = FrameBuilder.create("Row")
+        .primarySizing("AUTO")
+        .counterSizing("AUTO")
+        .layout("HORIZONTAL")
+        .spacing(spacing)
+        .appendTo(tableFrame)
+        .build();
+
+      // Context
+      TextBuilder.create(namespace)
+        .font("Inter", "Regular")
+        .fontSize(12)
+        .alignVertical("CENTER")
+        .resize(columnWidths.context, rowHeight)
+        .appendTo(rowFrame);
+
+      // Token Name
+      TextBuilder.create(fullName)
+        .font("Inter", "Semi Bold")
+        .fontSize(12)
+        .alignVertical("CENTER")
+        .resize(columnWidths.tokenName, rowHeight)
+        .appendTo(rowFrame);
+
+      // Use (placeholder)
+      TextBuilder.create(pairs[fullName].background?.description || "")
+        .font("Inter", "Regular")
+        .fontSize(12)
+        .alignVertical("CENTER")
+        .resize(columnWidths.use, rowHeight)
+        .appendTo(rowFrame);
+
+      const backgroundFrame = FrameBuilder.create("background")
+        .layout("VERTICAL")
+        .size(columnWidths.background, rowHeight)
+        .spacing(spacing)
+        .appendTo(rowFrame)
+        .build();
+
+      // Background
+      backgroundFrame.appendChild(
+        createColorSquare(
+          pair.background ? pair.background.color : undefined,
+          columnWidths.square,
+          rowHeight,
+        ),
+      );
+      const foregroundFrame = FrameBuilder.create("foreground")
+        .layout("VERTICAL")
+        .size(columnWidths.foreground, rowHeight)
+        .spacing(spacing)
+        .appendTo(rowFrame)
+        .build();
+
+      // Foreground
+      foregroundFrame.appendChild(
+        createColorSquare(
+          pair.foreground ? pair.foreground.color : undefined,
+          columnWidths.square,
+          rowHeight,
+        ),
+      );
+
+      // Ratio (placeholder por enquanto)
+      TextBuilder.create("AAA")
+        .font("Inter", "Regular")
+        .fontSize(12)
+        .alignVertical("CENTER")
+        .resize(columnWidths.ratio, rowHeight)
+        .appendTo(rowFrame);
+
+      // Preview
+      const previewFrame = FrameBuilder.create()
+        .size(columnWidths.preview, rowHeight)
+        .layout("NONE") // permite sobreposição
+        .appendTo(rowFrame)
+        .build();
+
+      const previewRect = createColorSquare(
+        pair.background ? pair.background.color : undefined,
+        columnWidths.square,
+        rowHeight,
+      );
+
+      previewFrame.appendChild(previewRect);
+
+      const previewText = TextBuilder.create("AA")
+        .font("Inter", "Semi Bold")
+        .fontSize(12)
+        .resize(columnWidths.preview, rowHeight)
+        .appendTo(previewFrame)
+        .alignHorizontal("CENTER")
+        .alignVertical("CENTER")
+        .build();
+
+      // Aplica foreground no texto do preview se existir
+      if (pair.foreground) {
+        previewText.fills = [
+          {
+            type: "SOLID",
+            color: {
+              r: pair.foreground.color.r,
+              g: pair.foreground.color.g,
+              b: pair.foreground.color.b,
+            },
+          },
+        ];
+      }
+    }
+  }
+
+  return tableFrame;
+}
+
 async function generateDoc(collectionId: string, modeId: string) {
   await figma.loadFontAsync({ family: "Inter", style: "Semi Bold" });
   await figma.loadFontAsync({ family: "Inter", style: "Regular" });
 
   const mainContainer = FrameBuilder.create("Color System")
-    .size(1024, 1080)
+    .primarySizing("AUTO")
+    .counterSizing("AUTO")
     .layout("VERTICAL")
     .padding(10)
     .spacing(10)
+    .fillHex("#DDDCDC")
     .appendTo(figma.currentPage)
     .build();
 
@@ -356,10 +701,10 @@ async function generateDoc(collectionId: string, modeId: string) {
     .appendTo(contentSubDescription)
     .build();
 
-  FrameBuilder.create("Color Description")
-    .size(412, 80)
+  const colorDecription = FrameBuilder.create("Color Description")
     .layout("VERTICAL")
-    .align("STRETCH")
+    .primarySizing("AUTO")
+    .counterSizing("AUTO")
     .padding(10)
     .spacing(8)
     .appendTo(content)
@@ -371,19 +716,19 @@ async function generateDoc(collectionId: string, modeId: string) {
     (v: Variable) => v.variableCollectionId === collectionId,
   );
 
-  const tokens: ColorToken[] = [];
-
-  console.log("Variáveis encontradas na collection: ", variablesInCollection);
+  const collection = new ColorTokenCollection();
 
   for (const variable of variablesInCollection) {
     const token = await ColorToken.fromVariable(variable, modeId);
-
-    if (token) {
-      tokens.push(token);
-    }
+    if (token) collection.add(token);
   }
 
-  console.log("Tokens resolvidos: ", tokens);
+  const grouped = collection.groupByNamespace().groupByPair();
+
+  const colorFrame = await createColorSystemTable(grouped);
+  colorDecription.appendChild(colorFrame);
+
+  console.log(Array.from(grouped.entries()));
 
   figma.notify("Documento gerado com sucesso!");
 }
